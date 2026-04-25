@@ -13,10 +13,14 @@ if [[ ! -f "$ENV_FILE" ]]; then
 	exit 1
 fi
 
+# Disable -u while sourcing .env: bcrypt password hashes contain '$' which
+# bash would otherwise expand as variable references and trip "unbound variable".
+set +u
 set -a
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 set +a
+set -u
 
 : "${COMFY_USER:?COMFY_USER not set in .env}"
 : "${COMFY_PASS_HASH:?COMFY_PASS_HASH not set in .env}"
