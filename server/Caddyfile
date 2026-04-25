@@ -3,7 +3,7 @@
 	auto_https off
 }
 
-:8080 {
+:{$CADDY_PORT:8181} {
 	basic_auth /* {
 		{$COMFY_USER} {$COMFY_PASS_HASH}
 	}
