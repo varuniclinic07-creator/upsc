@@ -49,9 +49,16 @@ run_forever comfyui bash -c "
 # 2) Caddy reverse proxy with basic auth on :8080.
 run_forever caddy caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
 
-# 3) Cloudflare tunnel. If TUNNEL_NAME is set, use the named tunnel
-#    (stable URL on user's domain). Otherwise, quick tunnel with a random URL.
-if [[ -n "${TUNNEL_NAME:-}" ]]; then
+# 3) Cloudflare tunnel. Three modes:
+#    - If a systemd cloudflared service is already active (i.e. installed via
+#      `cloudflared service install <token>` from the Cloudflare dashboard),
+#      let it run and don't launch a second instance.
+#    - Else if TUNNEL_NAME is set, run the named tunnel.
+#    - Else fall back to a quick tunnel (random *.trycloudflare.com URL).
+if systemctl is-active --quiet cloudflared 2>/dev/null; then
+	echo "[$(date -Is)] cloudflared systemd service is active; skipping tunnel launch" \
+		>>"$LOG_DIR/tunnel.log"
+elif [[ -n "${TUNNEL_NAME:-}" ]]; then
 	run_forever tunnel cloudflared tunnel --no-autoupdate run "$TUNNEL_NAME"
 else
 	run_forever tunnel cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8080
