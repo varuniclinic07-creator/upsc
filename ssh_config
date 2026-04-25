@@ -1,0 +1,7 @@
+Host vastai
+    HostName 184.144.255.168
+    Port 22281
+    User root
+    IdentityFile ~/.ssh/VastAI_key
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
