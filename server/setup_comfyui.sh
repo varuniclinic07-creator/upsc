@@ -75,23 +75,65 @@ install_python_deps() {
 	source "$COMFYUI_DIR/.venv/bin/activate"
 	pip install --upgrade pip wheel
 
-	# Detect CUDA major version from nvidia-smi to pick the right PyTorch wheel.
-	local cuda_idx_url="https://download.pytorch.org/whl/cu124"
-	if command -v nvidia-smi >/dev/null 2>&1; then
-		local cuda_ver
-		cuda_ver="$(nvidia-smi | grep -oE 'CUDA Version: [0-9]+\.[0-9]+' | awk '{print $3}' | head -n1 || true)"
-		case "${cuda_ver%%.*}" in
-			11) cuda_idx_url="https://download.pytorch.org/whl/cu118" ;;
-			12) cuda_idx_url="https://download.pytorch.org/whl/cu124" ;;
-		esac
-		log "Detected CUDA ${cuda_ver:-unknown}; using $cuda_idx_url"
-	else
+	# Pick a PyTorch wheel that ships kernels for this GPU's compute
+	# capability. Compute capability — not CUDA version — is what determines
+	# whether torch's prebuilt kernels run; the cu1XX index only controls
+	# which CUDA runtime is bundled in the wheel and is forward-compatible
+	# with newer host drivers. RTX 50-series (Blackwell, sm_120) needs cu128.
+	local cuda_idx_url=""
+	if ! command -v nvidia-smi >/dev/null 2>&1; then
 		log "nvidia-smi not found — installing CPU-only torch (ComfyUI will be slow!)"
 		cuda_idx_url="https://download.pytorch.org/whl/cpu"
+	else
+		local compute_cap cap_major cap_minor cap_int
+		compute_cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+		cap_major="${compute_cap%%.*}"
+		cap_minor="${compute_cap##*.}"
+		if [[ "$cap_major" =~ ^[0-9]+$ && "$cap_minor" =~ ^[0-9]+$ ]]; then
+			cap_int=$(( cap_major * 10 + cap_minor ))
+			if   (( cap_int >= 120 )); then cuda_idx_url="https://download.pytorch.org/whl/cu128"   # Blackwell (RTX 50xx)
+			elif (( cap_int >= 80  )); then cuda_idx_url="https://download.pytorch.org/whl/cu124"   # Ampere/Ada/Hopper
+			elif (( cap_int >= 70  )); then cuda_idx_url="https://download.pytorch.org/whl/cu121"   # Volta/Turing
+			elif (( cap_int >= 60  )); then cuda_idx_url="https://download.pytorch.org/whl/cu118"   # Pascal
+			else                            cuda_idx_url="https://download.pytorch.org/whl/cpu"     # too old for modern torch
+			fi
+			log "Detected GPU compute capability ${compute_cap}; using $cuda_idx_url"
+		else
+			# Fallback: parse CUDA version from nvidia-smi banner.
+			local cuda_ver
+			cuda_ver="$(nvidia-smi | grep -oE 'CUDA Version: [0-9]+\.[0-9]+' | awk '{print $3}' | head -n1 || true)"
+			case "${cuda_ver%%.*}" in
+				13) cuda_idx_url="https://download.pytorch.org/whl/cu128" ;;
+				12) cuda_idx_url="https://download.pytorch.org/whl/cu124" ;;
+				11) cuda_idx_url="https://download.pytorch.org/whl/cu118" ;;
+				*)  cuda_idx_url="https://download.pytorch.org/whl/cu124" ;;
+			esac
+			log "Could not read compute_cap; falling back to CUDA ${cuda_ver:-unknown} → $cuda_idx_url"
+		fi
 	fi
 
 	pip install --index-url "$cuda_idx_url" torch torchvision torchaudio
 	pip install -r "$COMFYUI_DIR/requirements.txt"
+
+	# Sanity check: confirm torch can see the GPU and built-in kernels match.
+	# Non-fatal — we only warn, since CPU installs will legitimately fail this.
+	if [[ "$cuda_idx_url" != *"/cpu" ]]; then
+		if ! python - <<-'PY'
+			import sys, torch
+			if not torch.cuda.is_available():
+			    print("torch built but CUDA not available; check driver", file=sys.stderr)
+			    sys.exit(1)
+			cap = torch.cuda.get_device_capability(0)
+			x = torch.randn(64, 64, device="cuda")
+			(x @ x).sum().item()  # forces a kernel launch
+			print(f"torch {torch.__version__} OK on sm_{cap[0]}{cap[1]}")
+		PY
+		then
+			log "WARNING: torch GPU smoke test failed. The wheel ($cuda_idx_url) may not match this GPU."
+			log "         Try: pip install --force-reinstall --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio"
+		fi
+	fi
+
 	deactivate
 }
 
@@ -156,6 +198,13 @@ Next steps:
          cloudflared tunnel create comfy
          cloudflared tunnel route dns comfy comfy.<your-domain>
      Then set TUNNEL_NAME=comfy in .env and re-run onstart.sh.
+
+Repairing an existing install (e.g. RTX 50-series box installed with the
+old script and now hitting "no kernel image is available"):
+       cd \$COMFYUI_DIR && source .venv/bin/activate
+       pip uninstall -y torch torchvision torchaudio
+       pip install --index-url https://download.pytorch.org/whl/cu128 torch torchvision torchaudio
+       python -c "import torch; print(torch.cuda.get_device_capability(), torch.__version__)"
 EOF
 }
 
